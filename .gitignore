@@ -30,3 +30,11 @@
 *.exe
 *.out
 *.app
+
+# environment
+.pio
+.vscode
+.DS_Store
+
+# config
+src/configs.cpp

@@ -12,6 +12,7 @@
 #include <PubSubClient.h>
 #include <EEPROM.h>
 #include <ArduinoJson.h>
+#include "configs.h"
 
 #define WDT_TIMEOUT_S 8 // Set the WDT timeout to 8 seconds
 
@@ -21,16 +22,10 @@ byte statussaved = 0;
 
 unsigned long startupTime;
 
-const char* ssid = "YourWifiSSID";
-const char* password = "YourWifiPassword";
 
-const char* mqttServer = "YourMqttServeraddress";
-const int mqttPort = 1883; //port used by the Mqtt broker - usually 1883
-const char* mqttID = "AlarmESP8266";
-const char* mqttUser = "YourMqttUsername";
-const char* mqttPassword = "YourMqttPassword";
 const char* mqttTopic = "Alarm/active_zones";
 const char* mqttStateTopic = "Alarm/status";
+const char* mqttTargetStateTopic = "Alarm/target_state"; // HK requires this topic to have the target state it wants to be. alarm must publish to this and to the other state
 const char* mqttControlTopic = "Alarm/control"; //this topic is used to control the alarm activation, as well as to activate debug data for the alarm protocol - this data was extremely usefull for the development, but is probably irrelevant now
 const char* lwtTopic = "Alarm/lwt";
 const char* birthMessage = "Online";
@@ -42,11 +37,12 @@ const char* teleTopic = "Alarm/tele"; //Topic for the telemetry
 
 const char* resetCause;
 
-const int clockPin = D6;
-const int dataPin = D7;
+// for d1_mini, with board = d1_mini , these pins D5/D6 match
+const int clockPin = D5;
+const int dataPin = D6;
 const int parcialPin = D1;
 const int totalPin = D2;
-const int alarmePin = D5;
+const int alarmePin = D3;
 
 const int boundaryLen = 8;
 const int bufferSize = 128;
@@ -86,25 +82,39 @@ void activatePin(int pin, unsigned long duration) {
 void publishStatus(byte estado) {
   switch (estado) {
       case 0:
-        client.publish(mqttStateTopic, "Desarmado", true);
+        // disarmed
+        //client.publish(mqttStateTopic, "D", true);
         break;
       case 1:
-        client.publish(mqttStateTopic, "Armado Total", true);
+        // armed total
+        client.publish(mqttTargetStateTopic, "SA", true);
+        client.publish(mqttStateTopic, "SA", true);
         break;
       case 2:
-        client.publish(mqttStateTopic, "Armado Parcial", true);
+        // night mode armed
+        client.publish(mqttTargetStateTopic, "NA", true);
+        client.publish(mqttStateTopic, "NA", true);
         break;
       case 3:
-        client.publish(mqttStateTopic, "Alarme Despoletado", true);
+        // triggered alarm
+        client.publish(mqttTargetStateTopic, "T", true);
+        client.publish(mqttStateTopic, "T", true);
         break;
       case 4:
         client.publish(mqttStateTopic, "Chime", true);
         break;
       case 5:
-        client.publish(mqttStateTopic, "A armar Total", true);
+        // starting away arm
+        client.publish(mqttTargetStateTopic, "SA", true);
         break;
       case 6:
-        client.publish(mqttStateTopic, "A armar Parcial", true);
+        // starting night arm
+        client.publish(mqttTargetStateTopic, "NA", true);
+        break;
+      case 7:
+        // I am now disarmed - this means I was armed before.
+        client.publish(mqttTargetStateTopic, "D", true);
+        client.publish(mqttStateTopic, "D", true);
         break;
     }
 }
@@ -174,35 +184,44 @@ void printBuffer(const std::deque<int>& buffer, unsigned int length) {
           if (buffer[jaarmado] == 1) {
             status = 3;
             Serial.println("Disparado");
+            client.publish(logTopic, "STATUS: Disparado");
           } else {
             status = 4;
             Serial.println("Chime");
+            client.publish(logTopic, "STATUS: Chime");
           }
         } else if (buffer[statu1] == 1 && buffer[statu2] == 0 && buffer[jaarmado] == 1) { //disarmed
             status = 0;
-            Serial.println("Desarmado");
+            Serial.println("Vamos desarmar - Desarmado");
+            client.publish(logTopic, "STATUS: desarmado vindo do jaarmado 1 (0)");
         } else if (buffer[parcial] == 1 && status != 3) { //bit 56 is 1 when the alarm is armed partially and 0 if totally
           if ((buffer[statu2] == 0 && buffer[jaarmado] == 1) || (buffer[statu1] == 1 && buffer[statu3] == 0 && status != 6)) {
             Serial.println("Armado Parcial");
+            client.publish(logTopic, "STATUS: Armado parcial");
             status = 2;
           } else if (status != 2) {
             Serial.println("A armar Parcial");
+            client.publish(logTopic, "STATUS: A armar parcial");
             status = 6;
           }
         } else if (buffer[total] == 1 && status != 3) {
           if ((buffer[statu2] == 0 && buffer[jaarmado] == 1) || (buffer[statu1] == 1 && buffer[statu3] == 0 && status != 5)) {
             Serial.println("Armado Total");
+            client.publish(logTopic, "STATUS: Armado total");
             status = 1;
           } else if (status != 1) {
             Serial.println("A armar Total");
+            client.publish(logTopic, "STATUS: A armar total");
             status = 5;
           }
         } else if (status != 3) { //disarmed
-          status = 0;
+          status = 7;
           Serial.println("Desarmado");
+          client.publish(logTopic, "STATUS: Desarmado (7)");
         } else if (buffer[statu1] == 0) { //disarm successful
           status = 0;
-          Serial.println("Desarmado");
+          Serial.println("Desarmado successful");
+          client.publish(logTopic, "STATUS: Desarmado successful (0)");
         }
         publishStatus(status);
         //prevent unnecessary writting to flash
@@ -389,11 +408,11 @@ void callback(char* topic, byte* payload, unsigned int length) {
     } else if (receivedPayload == "alarmepin") {
       client.publish(logTopic, "Alarme despoletado activamente");
       activatePin(alarmePin, 1000);
-    } else if (receivedPayload == "parcial") {
+    } else if (receivedPayload == "NA") {
       client.publish(logTopic, "Activada Guarda Parcial");
       sendBinaryPacket(17); //Send "enter" at the beggining to "wake up the system"
       sendBinaryPacket(14);
-    } else if (receivedPayload == "total") {
+    } else if (receivedPayload == "SA") {
       client.publish(logTopic, "Activada Guarda Total");
       sendBinaryPacket(17); //Send "enter" at the beggining to "wake up the system"
       sendBinaryPacket(13);
@@ -424,6 +443,19 @@ void callback(char* topic, byte* payload, unsigned int length) {
       }
       sendBinaryPacket(17); //Send "enter" at the end
       client.publish(logTopic, "Desarmado");
+    } else if (receivedPayload == "D") { // HK wants the same payload "D" to be the disarm command
+      sendBinaryPacket(17); //Send "enter" at the beggining to "wake up the system"
+      String digits = hardcodedPinPassword; 
+      for (size_t i = 0; i < digits.length(); i++) {
+        char digitChar = digits.charAt(i);
+        if (isdigit(digitChar)) {
+          int digit = digitChar - '0'; // Convert char to integer
+          sendBinaryPacket(digit);
+        }
+      }
+      sendBinaryPacket(17); //Send "enter" at the end
+      client.publish(logTopic, "Desarmado HK");
+    
     } else if (receivedPayload == "debugon") {
       client.publish(logTopic, "Debug on!");
       Serial.println("Debug on!");
