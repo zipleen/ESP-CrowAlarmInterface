@@ -25,7 +25,7 @@ unsigned long startupTime;
 
 const char* mqttTopic = "Alarm/active_zones";
 const char* mqttStateTopic = "Alarm/status";
-const char* mqttTargetStateTopic = "Alarm/target_state"; // HK requires this topic to have the target state it wants to be. alarm must publish to this and to the other state
+const char* mqttTargetStateTopic = "Alarm/target_state"; // HK requires this topic to have the target state it wants to be. alarm must publish to this and then to the other status once it is applied
 const char* mqttControlTopic = "Alarm/control"; //this topic is used to control the alarm activation, as well as to activate debug data for the alarm protocol - this data was extremely usefull for the development, but is probably irrelevant now
 const char* lwtTopic = "Alarm/lwt";
 const char* birthMessage = "Online";
@@ -83,7 +83,8 @@ void publishStatus(byte estado) {
   switch (estado) {
       case 0:
         // disarmed
-        //client.publish(mqttStateTopic, "D", true);
+        client.publish(mqttTargetStateTopic, "D", true);
+        client.publish(mqttStateTopic, "D", true);
         break;
       case 1:
         // armed total
@@ -110,11 +111,6 @@ void publishStatus(byte estado) {
       case 6:
         // starting night arm
         client.publish(mqttTargetStateTopic, "NA", true);
-        break;
-      case 7:
-        // I am now disarmed - this means I was armed before.
-        client.publish(mqttTargetStateTopic, "D", true);
-        client.publish(mqttStateTopic, "D", true);
         break;
     }
 }
@@ -144,17 +140,20 @@ void printBuffer(const std::deque<int>& buffer, unsigned int length) {
       client.publish(debugTopic, hexValue.c_str());
     }
 
+    // messages with 9 bytes are 72 bits long . there's also messages with 8, 10 and 11 bytes, but looks like they are ignored?
     if (length == 72) {
       bool activeZoneDetected = false;
       int multiplicador = 0;
       int multiplic = inicio + 16;
-      int statusrep = inicio + 63;
-      int statu1 = inicio + 24;
-      int statu2 = inicio + 25;
-      int statu3 = inicio + 27;
-      int jaarmado = inicio + 26;
-      int total = inicio + 48;
-      int parcial = inicio + 56;
+      int statusrep = inicio + 63; // last bit of 8th byte
+      int statu_startarm1 = inicio + 24; // first bit of 4th byte (old statu1)
+      int statu_midarm2 = inicio + 25; // second bit of 4th byte (old statu2)
+      int statu4 = inicio + 27; // forth bit of 4th byte (old statu3)
+      int statu3 = inicio + 26; // third bit of 4th byte (old jaarmado)
+      int statu5 = inicio + 28;
+      int fully_armed = inicio + 48; // fully_armed = 1 && partial_armed = 0 -- fully armed
+      int partial_armed = inicio + 56;// fully_armed = 0 && partial_armed = 1 -- partially armed
+                                 // fully_armed = 0 && partial_armed = 0 -- not armed status                       
       if (buffer[statusrep] == 0) {  //bit 63 is 0 when the messages report the zones and not status changes
         if (buffer[multiplic] == 1) {  //bit 16 is 1 when the the active zones are from 9 to 16
           multiplicador = 8; //so you must add 8 to the index number to get the actual zone
@@ -180,48 +179,51 @@ void printBuffer(const std::deque<int>& buffer, unsigned int length) {
           }
         }
       } else { //handle status messages
-        if (buffer[statu1] == 1 && buffer[statu2] == 1 && buffer[statu3] == 1) { //triggered
-          if (buffer[jaarmado] == 1) {
-            status = 3;
-            Serial.println("Disparado");
-            client.publish(logTopic, "STATUS: Disparado");
-          } else {
-            status = 4;
+        bool is_disarmed = buffer[fully_armed] == 0 && buffer[partial_armed] == 0; 
+        // start with triggering the alarm, at this point we dont care if it is armed or not, because of the chime (untested!)
+        if (!is_disarmed && buffer[statu_startarm1] == 1 && buffer[statu_midarm2] == 1 && buffer[statu4] == 1 && buffer[statu5] == 1) { //triggered, 1 1 X 1
+          if (buffer[statu3] == 1) {
+            status = 3; // 1 1 1 1  1 0 0 1
+            Serial.println("Fired Alarm");
+            client.publish(logTopic, "STATUS: Fired alarm");
+          } else {  // broken! no idea how to trigger a chime
+            status = 4; // 1 1 0 1
             Serial.println("Chime");
             client.publish(logTopic, "STATUS: Chime");
           }
-        } else if (buffer[statu1] == 1 && buffer[statu2] == 0 && buffer[jaarmado] == 1) { //disarmed
+        } else if (is_disarmed && buffer[statu3] == 1) { //disarmed, for some reason statu3 is 1 on this one, but 56 and 60 are 0
             status = 0;
             Serial.println("Vamos desarmar - Desarmado");
-            client.publish(logTopic, "STATUS: desarmado vindo do jaarmado 1 (0)");
-        } else if (buffer[parcial] == 1 && status != 3) { //bit 56 is 1 when the alarm is armed partially and 0 if totally
-          if ((buffer[statu2] == 0 && buffer[jaarmado] == 1) || (buffer[statu1] == 1 && buffer[statu3] == 0 && status != 6)) {
-            Serial.println("Armado Parcial");
-            client.publish(logTopic, "STATUS: Armado parcial");
-            status = 2;
-          } else if (status != 2) {
-            Serial.println("A armar Parcial");
-            client.publish(logTopic, "STATUS: A armar parcial");
-            status = 6;
-          }
-        } else if (buffer[total] == 1 && status != 3) {
-          if ((buffer[statu2] == 0 && buffer[jaarmado] == 1) || (buffer[statu1] == 1 && buffer[statu3] == 0 && status != 5)) {
+            client.publish(logTopic, "STATUS: Disarmed");
+        } else if (!is_disarmed && buffer[fully_armed] == 1 && buffer[partial_armed] == 0) { // fully armed
+          if (buffer[statu_startarm1] == 0 && buffer[statu_midarm2] == 0 && buffer[statu3] == 1 && buffer[statu4] == 0) {
             Serial.println("Armado Total");
-            client.publish(logTopic, "STATUS: Armado total");
+            client.publish(logTopic, "STATUS: Armed total");
             status = 1;
-          } else if (status != 1) {
+          } else if ((buffer[statu_startarm1] == 1 && buffer[statu_midarm2] == 0 && buffer[statu3] == 0 && buffer[statu4] == 1) ||
+                     (buffer[statu_startarm1] == 0 && buffer[statu_midarm2] == 1 && buffer[statu3] == 0 && buffer[statu4] == 1) ){
             Serial.println("A armar Total");
-            client.publish(logTopic, "STATUS: A armar total");
+            client.publish(logTopic, "STATUS: Arming total");
             status = 5;
           }
-        } else if (status != 3) { //disarmed
-          status = 7;
-          Serial.println("Desarmado");
-          client.publish(logTopic, "STATUS: Desarmado (7)");
-        } else if (buffer[statu1] == 0) { //disarm successful
-          status = 0;
-          Serial.println("Desarmado successful");
-          client.publish(logTopic, "STATUS: Desarmado successful (0)");
+        } else if (!is_disarmed && buffer[fully_armed] == 0 && buffer[partial_armed] == 1) { // partially armed  
+          if (buffer[statu_startarm1] == 1 && buffer[statu_midarm2] == 0 && buffer[statu3] == 1 && buffer[statu4] == 0 && buffer[inicio + 28] == 1) { // special case for night armed
+            Serial.println("Armado Parcial");
+            client.publish(logTopic, "STATUS: Armed partial");
+            status = 2;
+          } else if ((buffer[statu_startarm1] == 1 && buffer[statu_midarm2] == 0 && buffer[statu3] == 0 && buffer[statu4] == 1) ||
+                     (buffer[statu_startarm1] == 0 && buffer[statu_midarm2] == 1 && buffer[statu3] == 0 && buffer[statu4] == 1) ){
+            Serial.println("A armar Parcial");
+            client.publish(logTopic, "STATUS: Arming partial");
+            status = 6;
+          }
+        } else {
+          char message[90];
+          snprintf(message, sizeof(message), "STATUS: Ignored status %d %d %d %d  %d %d %d %d fully_armed: %d partially_armed: %d is_disarmed: %d", 
+                buffer[inicio + 24], buffer[inicio + 25], buffer[inicio + 26], buffer[inicio + 27], 
+                buffer[inicio + 28], buffer[inicio + 29], buffer[inicio + 30], buffer[inicio + 31], buffer[fully_armed], buffer[partial_armed], is_disarmed );
+            
+          client.publish(logTopic, message);
         }
         publishStatus(status);
         //prevent unnecessary writting to flash
