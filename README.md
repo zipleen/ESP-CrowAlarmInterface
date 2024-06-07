@@ -1,4 +1,38 @@
 # ESP-CrowAlarmInterface
+
+I've changed the code to better accomodate mqttthing expectations for an alarm. It looks like we need to send messages to "target_state" and then finally to "status" to get homekit to comply. 
+
+The logic seemed to not work for my Crow Runner 16 (it's an install from 2005), so I've reworked the entire status change bit checks to make it work. No idea if the previous implementation was working correctly for HA only or something is off with my alarm, but with the current implementation it seems to work fine. Didn't use or test the zone information. 
+
+More details are inside the docs/ folder with the detailed explanation of the bytes. It seems to be working perfectly now.
+
+MQTTThing config:
+```
+        {
+            "accessory": "mqttthing",
+            "type": "securitySystem",
+            "name": "Alarm",
+            "url": "http://ip:1883",
+            "username": "user",
+            "password": "pass",
+            "logMqtt": true,
+            "caption": "Alarme",
+            "topics": {
+                "setTargetState": "Alarm/control",
+                "getTargetState": "Alarm/target_state",
+                "getCurrentState": "Alarm/status"
+            },
+            "restrictTargetState": [
+                0,
+                2,
+                3
+            ]
+        }
+
+```
+
+## previous README
+
 Interface for Crow Runner 8/16 Alarm System using an ESP8266 connected to CLK and DAT lines (usually used by the Keypads)
 
 Based on https://github.com/sivann/crowalarm - thanks to sivann for figuring out the communication protocol.
